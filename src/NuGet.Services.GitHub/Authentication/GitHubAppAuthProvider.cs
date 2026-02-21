@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using NuGet.Services.GitHub.Configuration;
 using NuGet.Services.KeyVault;
@@ -21,6 +22,7 @@ namespace NuGet.Services.GitHub.Authentication
         private readonly IKeyVaultDataSigner _dataSigner;
         private long _installationId = -1;
         private AccessToken _accessToken = null;
+        private readonly SemaphoreSlim _tokenRefreshLock = new(1, 1);
 
         public GitHubAppAuthProvider(
             GraphQLQueryConfiguration configuration,
@@ -119,15 +121,26 @@ namespace NuGet.Services.GitHub.Authentication
         {
             if (_accessToken is null || _accessToken.ExpiresAt <= DateTimeOffset.UtcNow.AddMinutes(2))
             {
-                var jwt = await CreateSignedJwtAsync();
-                GitHubClient client = CreateGitHubClient(jwt);
-
-                if (_installationId == -1)
+                await _tokenRefreshLock.WaitAsync();
+                try
                 {
-                    _installationId = await GetInstallationIdAsync(client);
-                }
+                    if (_accessToken is null || _accessToken.ExpiresAt <= DateTimeOffset.UtcNow.AddMinutes(2))
+                    {
+                        var jwt = await CreateSignedJwtAsync();
+                        GitHubClient client = CreateGitHubClient(jwt);
 
-                _accessToken = await client.GitHubApps.CreateInstallationToken(_installationId);
+                        if (_installationId == -1)
+                        {
+                            _installationId = await GetInstallationIdAsync(client);
+                        }
+
+                        _accessToken = await client.GitHubApps.CreateInstallationToken(_installationId);
+                    }
+                }
+                finally
+                {
+                    _tokenRefreshLock.Release();
+                }
             }
 
 			return _accessToken.Token;
