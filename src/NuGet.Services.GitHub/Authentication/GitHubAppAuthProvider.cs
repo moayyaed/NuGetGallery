@@ -44,7 +44,7 @@ namespace NuGet.Services.GitHub.Authentication
             message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", authToken);
         }
 
-        private async Task<string> CreateSignedJwt()
+        private async Task<string> CreateSignedJwtAsync()
         {
             string unsignedJwt = CreateJwt();
             byte[] digest = GetHash(unsignedJwt);
@@ -53,7 +53,7 @@ namespace NuGet.Services.GitHub.Authentication
             return jwt;
         }
 
-        private byte[] GetHash(string unsignedJwt)
+        private static byte[] GetHash(string unsignedJwt)
         {
             using var sha256 = System.Security.Cryptography.SHA256.Create();
             return sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(unsignedJwt));
@@ -119,7 +119,7 @@ namespace NuGet.Services.GitHub.Authentication
         {
             if (_accessToken is null || _accessToken.ExpiresAt <= DateTimeOffset.UtcNow.AddMinutes(2))
             {
-                var jwt = await CreateSignedJwt();
+                var jwt = await CreateSignedJwtAsync();
                 GitHubClient client = CreateGitHubClient(jwt);
 
                 if (_installationId == -1)
