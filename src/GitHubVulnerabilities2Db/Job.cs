@@ -7,7 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Autofac;
 using Azure.Identity;
-using Azure.Storage.Blobs;
+using Azure.Security.KeyVault.Keys.Cryptography;
 using GitHubVulnerabilities2Db.Configuration;
 using GitHubVulnerabilities2Db.Fakes;
 using GitHubVulnerabilities2Db.Gallery;
@@ -23,6 +23,7 @@ using NuGet.Services.GitHub.Collector;
 using NuGet.Services.GitHub.Configuration;
 using NuGet.Services.GitHub.GraphQL;
 using NuGet.Services.GitHub.Ingest;
+using NuGet.Services.KeyVault;
 using NuGet.Services.Storage;
 using NuGetGallery;
 using NuGetGallery.Auditing;
@@ -60,7 +61,7 @@ namespace GitHubVulnerabilities2Db
             containerBuilder
                 .RegisterAdapter<IOptionsSnapshot<GitHubVulnerabilities2DbConfiguration>, GraphQLQueryConfiguration>(c => c.Value);
 
-            ConfigureQueryServices(containerBuilder);
+            ConfigureQueryServices(containerBuilder, configurationRoot);
             ConfigureIngestionServices(containerBuilder);
             ConfigureCollectorServices(containerBuilder, configurationRoot);
         }
@@ -142,16 +143,56 @@ namespace GitHubVulnerabilities2Db
                 .SingleInstance();
         }
 
-        protected void ConfigureQueryServices(ContainerBuilder containerBuilder)
+        protected void ConfigureQueryServices(ContainerBuilder containerBuilder, IConfigurationRoot configurationRoot)
         {
             containerBuilder
-                .RegisterInstance(_client)
-                .As<HttpClient>()
-                .ExternallyOwned(); // We don't want autofac disposing this--see https://github.com/NuGet/NuGetGallery/issues/9194
+                .Register(ctx =>
+                {
+                    var config = ctx.Resolve<GitHubVulnerabilities2DbConfiguration>();
+                    var keyVaultConfig = ctx.Resolve<KeyVaultConfiguration>();
+                    if (!keyVaultConfig.UseManagedIdentity)
+                    {
+                        throw new InvalidOperationException("Only managed identity authentication is supported.");
+                    }
+#if DEBUG
+                    var credential = new DefaultAzureCredential();
+#else
+                    if (string.IsNullOrWhiteSpace(keyVaultConfig.ClientId))
+                    {
+                        throw new InvalidOperationException("Key vault client ID is not configured.");
+                    }
+                    var credential = new ManagedIdentityCredential(keyVaultConfig.ClientId);
+#endif
+                    string vaultName = keyVaultConfig.VaultName.ToLowerInvariant();
+                    string keyName = config.GitHubAppPrivateKeyName.ToLowerInvariant();
+
+                    var keyUri = new Uri($"https://{vaultName}.vault.azure.net/keys/{keyName}");
+                    CryptographyClient cryptographyClient = new CryptographyClient(keyUri, credential);
+                    return new KeyVaultDataSigner(cryptographyClient);
+                })
+                .As<IKeyVaultDataSigner>();
 
             containerBuilder
                 .RegisterType<GitHubPersonalAccessTokenAuthProvider>()
-                .As<IGitHubAuthProvider>();
+                .AsSelf()
+                .SingleInstance();
+
+            containerBuilder
+                .RegisterType<GitHubAppAuthProvider>()
+                .AsSelf()
+                .SingleInstance();
+
+            containerBuilder
+                .Register<IGitHubAuthProvider>(ctx => {
+                    var config = ctx.Resolve<GitHubVulnerabilities2DbConfiguration>();
+                    if (string.IsNullOrWhiteSpace(config.GitHubAppId))
+                    {
+                        return ctx.Resolve<GitHubPersonalAccessTokenAuthProvider>();
+                    }
+                    return ctx.Resolve<GitHubAppAuthProvider>();
+                })
+                .As<IGitHubAuthProvider>()
+                .SingleInstance();
 
             containerBuilder
                 .RegisterType<QueryService>()
